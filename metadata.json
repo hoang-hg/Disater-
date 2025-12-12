@@ -1,0 +1,5 @@
+{
+  "name": "VnDisasterWatch",
+  "description": "Hệ thống thu thập và phân tích tin tức thiên tai từ 12 báo điện tử Việt Nam theo thời gian thực.",
+  "requestFramePermissions": []
+}
