@@ -16,7 +16,7 @@ export const fetchFirecrawlNews = async (): Promise<NewsItem[]> => {
 
   try {
     // 1. Sử dụng Firecrawl để tìm kiếm và lấy nội dung bài viết (Scrape)
-    // Endpoint /v1/search cho phép tìm và lấy luôn nội dung markdown
+    // OPTIMIZATION: Giảm limit xuống 4 để tăng tốc độ phản hồi (tránh timeout khi scrape quá nhiều trang)
     const firecrawlResponse = await fetch('https://api.firecrawl.dev/v1/search', {
       method: 'POST',
       headers: {
@@ -25,9 +25,9 @@ export const fetchFirecrawlNews = async (): Promise<NewsItem[]> => {
       },
       body: JSON.stringify({
         query: "tin tức thiên tai bão lũ sạt lở động đất Việt Nam mới nhất hôm nay",
-        limit: 8, // Lấy 8 bài mới nhất
+        limit: 4, 
         scrapeOptions: {
-          formats: ["markdown"], // Chỉ cần lấy markdown để tiết kiệm token
+          formats: ["markdown"],
           onlyMainContent: true
         }
       })
@@ -41,44 +41,42 @@ export const fetchFirecrawlNews = async (): Promise<NewsItem[]> => {
     }
 
     // 2. Chuẩn bị dữ liệu thô để gửi cho Gemini
-    // Chúng ta ghép nối các bài viết lại thành một context lớn
     const articlesContext = firecrawlData.data.map((item: any, index: number) => `
 --- BÀI BÁO SỐ ${index + 1} ---
 Tiêu đề: ${item.metadata?.title || 'Không rõ'}
 Nguồn: ${item.metadata?.sourceURL || 'Không rõ'}
 Ngày (metadata): ${item.metadata?.date || 'Không rõ'}
 Nội dung tóm tắt:
-${item.markdown ? item.markdown.substring(0, 3000) : 'Không có nội dung'}
-`).join('\n\n');
+${item.markdown ? item.markdown.substring(0, 2500) : 'Không có nội dung'} 
+`).join('\n\n'); // Giới hạn ký tự mỗi bài để giảm token input cho Gemini
 
-    // 3. Sử dụng Gemini để trích xuất thông tin có cấu trúc (Structured Data Extraction)
+    // 3. Sử dụng Gemini để trích xuất thông tin có cấu trúc
     const ai = new GoogleGenAI({ apiKey: googleKey });
     const prompt = `
-      Dưới đây là nội dung thô của các bài báo về thiên tai tại Việt Nam được thu thập từ Firecrawl.
-      Nhiệm vụ của bạn là phân tích văn bản và trích xuất thành danh sách JSON các sự kiện thiên tai.
+      Dưới đây là nội dung thô của các bài báo về thiên tai tại Việt Nam.
+      Hãy phân tích và trích xuất danh sách JSON các sự kiện thiên tai.
 
-      Yêu cầu xử lý:
-      1. Chỉ chọn các tin tức về thiên tai (bão, lũ, sạt lở, động đất, hạn hán) tại Việt Nam.
-      2. Bỏ qua các tin dự báo thời tiết thông thường (trừ khi là cảnh báo bão khẩn cấp).
-      3. Trích xuất chính xác số liệu thiệt hại nếu có.
-      4. Định dạng ngày tháng chuẩn YYYY-MM-DD.
+      Yêu cầu:
+      1. Chỉ chọn tin thiên tai (bão, lũ, sạt lở, động đất, hạn hán) tại Việt Nam.
+      2. Trích xuất số liệu thiệt hại cụ thể.
+      3. Ngày tháng định dạng YYYY-MM-DD.
       
-      Dữ liệu đầu vào:
+      Dữ liệu:
       ${articlesContext}
 
       Output JSON Schema (Array):
       [
         {
           "title": "String",
-          "source": "String (Tên báo)",
+          "source": "String",
           "sourceUrl": "String",
-          "date": "String (YYYY-MM-DD)",
+          "date": "String",
           "type": "Enum (FLOOD, STORM, LANDSLIDE, EARTHQUAKE, DROUGHT, OTHER)",
           "location": "String",
-          "damage": "String (Tóm tắt ngắn gọn)",
-          "summary": "String (Tóm tắt < 30 từ)",
-          "isVerified": Boolean (true nếu có trích dẫn cơ quan chức năng),
-          "agency": "String (Tên cơ quan chức năng nếu có)"
+          "damage": "String",
+          "summary": "String",
+          "isVerified": Boolean,
+          "agency": "String"
         }
       ]
     `;
@@ -96,7 +94,6 @@ ${item.markdown ? item.markdown.substring(0, 3000) : 'Không có nội dung'}
 
     const parsedItems = JSON.parse(text);
 
-    // Map dữ liệu về đúng format của App
     return parsedItems.map((item: any, index: number) => ({
       id: `fc-${Date.now()}-${index}`,
       title: item.title,
@@ -117,7 +114,6 @@ ${item.markdown ? item.markdown.substring(0, 3000) : 'Không có nội dung'}
   }
 };
 
-// Helper function
 const extractSourceFromUrl = (url: string): string => {
   try {
     const hostname = new URL(url).hostname;

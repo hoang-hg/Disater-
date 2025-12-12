@@ -10,6 +10,7 @@ import { fetchFirecrawlNews, isFirecrawlAvailable } from './services/firecrawlSe
 const App: React.FC = () => {
   const [news, setNews] = useState<NewsItem[]>(MOCK_NEWS);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [loadingText, setLoadingText] = useState<string>('');
   const [lastUpdated, setLastUpdated] = useState<string>(new Date().toLocaleString('vi-VN'));
   const [dataSource, setDataSource] = useState<'mock' | 'live-gemini' | 'live-firecrawl'>('mock');
 
@@ -23,9 +24,19 @@ const App: React.FC = () => {
     // Prioritize Firecrawl if key is present
     if (useFirecrawl) {
       setDataSource('live-firecrawl');
+      setLoadingText('Đang quét nội dung các báo điện tử...');
+      // Small delay to allow UI to update
+      await new Promise(r => setTimeout(r, 100));
+      
       fetchedNews = await fetchFirecrawlNews();
+      
+      if (fetchedNews.length === 0) {
+         setLoadingText('Đang thử lại với Google Search...');
+         fetchedNews = await fetchLatestDisasterNews();
+      }
     } else {
       setDataSource('live-gemini');
+      setLoadingText('Đang tìm kiếm với Google...');
       fetchedNews = await fetchLatestDisasterNews();
     }
     
@@ -33,18 +44,17 @@ const App: React.FC = () => {
       setNews(fetchedNews);
     } else {
       const msg = useFirecrawl 
-        ? "Firecrawl không trả về kết quả nào. Đang thử lại với dữ liệu mẫu."
-        : "Không tìm thấy tin tức mới hoặc chưa cấu hình API Key. Hiển thị dữ liệu mẫu.";
+        ? "Không tìm thấy dữ liệu mới phù hợp."
+        : "Không tìm thấy tin tức mới hoặc chưa cấu hình API Key.";
       
       alert(msg);
-      // Optional: Don't revert to mock if we want to show empty state, 
-      // but for UX keeping mock data is better in a demo.
       if (news.length === 0) setNews(MOCK_NEWS);
       setDataSource('mock');
     }
     
     setLastUpdated(new Date().toLocaleString('vi-VN'));
     setIsLoading(false);
+    setLoadingText('');
   };
 
   const handleReset = () => {
@@ -107,7 +117,7 @@ const App: React.FC = () => {
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
-                    Đang quét...
+                    {loadingText || "Đang xử lý..."}
                   </>
                 ) : (
                   <>

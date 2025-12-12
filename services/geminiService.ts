@@ -14,11 +14,12 @@ export const fetchLatestDisasterNews = async (): Promise<NewsItem[]> => {
 
   try {
     const model = 'gemini-2.5-flash';
+    // Removed requirement for "pure JSON" to avoid confusion if model adds markdown, handled in code below.
     const prompt = `
       Hãy tìm kiếm các tin tức mới nhất về thiên tai (bão, lũ, sạt lở, động đất, hạn hán) tại Việt Nam trong 7 ngày qua.
       Ưu tiên các nguồn báo chính thống: VnExpress, Tuổi Trẻ, Thanh Niên, VTV, Tiền Phong, Dân Trí.
       
-      Dựa trên kết quả tìm kiếm, hãy trích xuất và trả về một danh sách các sự kiện dưới dạng JSON thuần túy (không bọc trong markdown code block).
+      Dựa trên kết quả tìm kiếm, hãy trích xuất và trả về một danh sách các sự kiện dưới dạng JSON Array.
       
       Cấu trúc JSON yêu cầu cho mỗi tin:
       [
@@ -36,7 +37,7 @@ export const fetchLatestDisasterNews = async (): Promise<NewsItem[]> => {
         }
       ]
       
-      Chỉ trả về JSON Array, không thêm lời dẫn.
+      Quan trọng: Chỉ trả về JSON, không thêm lời dẫn, không giải thích.
     `;
 
     const response = await ai.models.generateContent({
@@ -44,17 +45,31 @@ export const fetchLatestDisasterNews = async (): Promise<NewsItem[]> => {
       contents: prompt,
       config: {
         tools: [{ googleSearch: {} }],
-        responseMimeType: "application/json"
+        // responseMimeType: "application/json" is NOT allowed with googleSearch tool
       }
     });
 
-    const text = response.text;
+    let text = response.text;
     if (!text) return [];
+
+    // Clean up markdown code blocks if present (Gemini might wrap JSON in ```json ... ```)
+    // Also remove any leading/trailing whitespace
+    text = text.trim();
+    if (text.startsWith('```json')) {
+      text = text.replace(/^```json/, '').replace(/```$/, '');
+    } else if (text.startsWith('```')) {
+      text = text.replace(/^```/, '').replace(/```$/, '');
+    }
 
     // Parse the JSON output
     try {
       const parsedData = JSON.parse(text);
       
+      if (!Array.isArray(parsedData)) {
+        console.warn("Gemini response is not an array:", parsedData);
+        return [];
+      }
+
       // Map to ensure types match our Enum
       return parsedData.map((item: any, index: number) => ({
         id: `gen-${Date.now()}-${index}`,
@@ -71,6 +86,7 @@ export const fetchLatestDisasterNews = async (): Promise<NewsItem[]> => {
       }));
     } catch (e) {
       console.error("Failed to parse Gemini JSON response", e);
+      console.debug("Raw text was:", text);
       return [];
     }
 
