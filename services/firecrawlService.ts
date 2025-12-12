@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from "@google/genai";
 import { NewsItem, DisasterType } from '../types';
 import { ALLOWED_DOMAINS, SOURCE_ENTRY_POINTS } from '../constants';
 
@@ -9,11 +9,6 @@ export const isFirecrawlAvailable = () => !!firecrawlKey && !!googleKey;
 
 /**
  * QUY TRÌNH MỚI: MAP -> SCRAPE -> ANALYZE
- * 1. Chọn ngẫu nhiên 3 domain từ danh sách (để tối ưu hiệu năng frontend).
- * 2. Dùng /v1/map để quét các link con chứa từ khóa "thiên tai/bão/lũ" từ các trang chuyên mục.
- * 3. Lấy Top URL hợp lệ nhất.
- * 4. Dùng /v1/batch/scrape để lấy nội dung chi tiết.
- * 5. Gửi cho Gemini phân tích.
  */
 export const fetchFirecrawlNews = async (): Promise<NewsItem[]> => {
   if (!firecrawlKey) {
@@ -22,24 +17,21 @@ export const fetchFirecrawlNews = async (): Promise<NewsItem[]> => {
   }
 
   try {
-    // 1. Chọn ngẫu nhiên 3 domain để quét (tránh request quá nhiều cùng lúc)
+    // 1. Chọn ngẫu nhiên 2-3 domain để quét
     const shuffledDomains = [...ALLOWED_DOMAINS].sort(() => 0.5 - Math.random()).slice(0, 3);
     const targetUrls = shuffledDomains.map(d => SOURCE_ENTRY_POINTS[d] || `https://${d}`);
 
     console.log("Đang quét Map các trang:", targetUrls);
 
-    // 2. Chạy Map song song để tìm Link bài viết
+    // 2. Chạy Map song song
     const mapPromises = targetUrls.map(url => mapSiteForLinks(url));
     const mapResults = await Promise.all(mapPromises);
 
-    // Gom tất cả link tìm được vào một mảng duy nhất
     let foundLinks: string[] = [];
     mapResults.forEach(links => {
-      // Lấy tối đa 2 link mỗi trang để Scrape
-      foundLinks = [...foundLinks, ...links.slice(0, 2)];
+      foundLinks = [...foundLinks, ...links.slice(0, 3)]; // Lấy 3 link mỗi trang
     });
 
-    // Lọc trùng
     foundLinks = [...new Set(foundLinks)];
 
     if (foundLinks.length === 0) {
@@ -49,33 +41,38 @@ export const fetchFirecrawlNews = async (): Promise<NewsItem[]> => {
 
     console.log("Tìm thấy các link bài viết:", foundLinks);
 
-    // 3. Batch Scrape nội dung các link này
+    // 3. Batch Scrape
     const scrapedData = await batchScrapeUrls(foundLinks);
 
     if (scrapedData.length === 0) return [];
 
-    // 4. Chuẩn bị context cho AI
+    // 4. Chuẩn bị context
     const articlesContext = scrapedData.map((item: any, index: number) => `
 --- BÀI VIẾT ID: ${index} ---
 URL Gốc: ${item.metadata?.sourceURL || item.url}
 Tiêu đề: ${item.metadata?.title || 'Không rõ'}
 Ngày: ${item.metadata?.date || 'Không rõ'}
 Nội dung:
-${item.markdown ? item.markdown.substring(0, 2000) : 'Không có nội dung'} 
+${item.markdown ? item.markdown.substring(0, 3000) : 'Không có nội dung'} 
 `).join('\n\n');
 
     // 5. Gửi cho Gemini
     const ai = new GoogleGenAI({ apiKey: googleKey });
     const prompt = `
-      Bạn là hệ thống trích xuất dữ liệu thiên tai.
-      Dữ liệu đầu vào là nội dung Markdown từ các bài báo thật.
+      Bạn là hệ thống trích xuất dữ liệu thiên tai từ tin tức.
       
-      Nhiệm vụ: Trích xuất thông tin thành JSON.
+      NHIỆM VỤ:
+      Phân tích nội dung Markdown và trích xuất thông tin thành JSON.
       
-      QUAN TRỌNG:
-      1. GIỮ NGUYÊN "id" (Index) để map ngược lại URL gốc.
-      2. Trích xuất chính xác Loại thiên tai, Địa điểm, Thiệt hại.
-      3. Nếu bài viết không liên quan đến thiên tai, bão lũ, sạt lở... hãy BỎ QUA.
+      YÊU CẦU QUAN TRỌNG:
+      1. GIỮ NGUYÊN "id" (Index từ input) để map ngược lại URL gốc.
+      2. Chỉ lấy tin về: Bão, Lũ lụt, Sạt lở, Động đất, Hạn hán, Thiên tai nghiêm trọng.
+      3. Bỏ qua tin dự báo thời tiết hàng ngày bình thường hoặc tin không liên quan.
+      4. NẾU KHÔNG CÓ TIN PHÙ HỢP, TRẢ VỀ MẢNG RỖNG []. 
+      5. TUYỆT ĐỐI KHÔNG TRẢ LỜI BẰNG VĂN BẢN (như "Rất tiếc...", "Tôi không thể..."). CHỈ TRẢ VỀ JSON.
+
+      Input Data:
+      ${articlesContext}
 
       Output JSON Schema (Array):
       [
@@ -93,32 +90,53 @@ ${item.markdown ? item.markdown.substring(0, 2000) : 'Không có nội dung'}
       ]
     `;
 
+    // Cấu hình safety để tránh chặn tin tức về thảm họa (thường có từ ngữ tiêu cực/bạo lực mô tả thiệt hại)
+    const safetySettings = [
+      { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+      { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+      { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+      { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+    ];
+
     const generatedContent = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
-      contents: prompt + "\n\n" + articlesContext,
+      contents: prompt,
       config: {
-        responseMimeType: "application/json"
+        responseMimeType: "application/json",
+        safetySettings: safetySettings,
       }
     });
 
-    const text = generatedContent.text;
+    let text = generatedContent.text;
     if (!text) return [];
 
-    const parsedItems = JSON.parse(text);
+    // Clean JSON string (remove markdown fences if present)
+    text = text.trim();
+    if (text.startsWith('```json')) text = text.replace(/^```json/, '').replace(/```$/, '');
+    else if (text.startsWith('```')) text = text.replace(/^```/, '').replace(/```$/, '');
 
-    // 6. Map kết quả AI với URL gốc từ dữ liệu Scrape
+    let parsedItems;
+    try {
+      parsedItems = JSON.parse(text);
+    } catch (parseError) {
+      console.error("JSON Parse Error. Raw text:", text);
+      return []; // Trả về rỗng an toàn thay vì crash
+    }
+
+    if (!Array.isArray(parsedItems)) return [];
+
+    // 6. Map kết quả
     const mappedItems = parsedItems.map((aiItem: any) => {
       const originalArticle = scrapedData[aiItem.id];
       if (!originalArticle) return null;
 
-      // URL chính xác từ kết quả scrape (hoặc map)
       const finalUrl = originalArticle.metadata?.sourceURL || originalArticle.url;
 
       return {
         id: `fc-map-${Date.now()}-${aiItem.id}`,
         title: aiItem.title || originalArticle.metadata?.title || 'Tin thiên tai',
         source: extractSourceFromUrl(finalUrl),
-        sourceUrl: finalUrl, // URL CHÍNH XÁC 100%
+        sourceUrl: finalUrl,
         date: aiItem.date || originalArticle.metadata?.date || new Date().toISOString().split('T')[0],
         type: mapType(aiItem.type),
         location: aiItem.location || 'Việt Nam',
@@ -134,14 +152,11 @@ ${item.markdown ? item.markdown.substring(0, 2000) : 'Không có nội dung'}
     });
 
   } catch (error) {
-    console.error("Lỗi quy trình Map -> Scrape:", error);
+    console.error("Lỗi quy trình Map -> Scrape -> Gemini:", error);
     return [];
   }
 };
 
-// --- HÀM HỖ TRỢ FIRECRAWL ---
-
-// 1. Sử dụng /v1/map để tìm link con
 const mapSiteForLinks = async (url: string): Promise<string[]> => {
   try {
     const response = await fetch('https://api.firecrawl.dev/v1/map', {
@@ -152,24 +167,21 @@ const mapSiteForLinks = async (url: string): Promise<string[]> => {
       },
       body: JSON.stringify({
         url: url,
-        search: "thiên tai bão lũ sạt lở", // Chỉ tìm link có chứa từ khóa này
-        limit: 10, // Chỉ lấy 10 link để lọc
-        ignoreSitemap: true // Quét trực tiếp trang
+        search: "thiên tai bão lũ sạt lở thiệt hại", 
+        limit: 10,
+        ignoreSitemap: true 
       })
     });
     
     const data = await response.json();
     if (!data.success || !data.links) return [];
-
-    // Lọc lại link một lần nữa để đảm bảo chất lượng
     return data.links.filter((link: string) => isValidArticleUrl(link));
   } catch (e) {
-    console.error(`Lỗi map ${url}:`, e);
+    console.warn(`Lỗi map ${url} (có thể bỏ qua):`, e);
     return [];
   }
 };
 
-// 2. Sử dụng /v1/batch/scrape để lấy nội dung
 const batchScrapeUrls = async (urls: string[]): Promise<any[]> => {
   try {
     const response = await fetch('https://api.firecrawl.dev/v1/batch/scrape', {
@@ -188,7 +200,7 @@ const batchScrapeUrls = async (urls: string[]): Promise<any[]> => {
     if (!data.success || !data.data) return [];
     return data.data;
   } catch (e) {
-    console.error("Lỗi batch scrape:", e);
+    console.warn("Lỗi batch scrape:", e);
     return [];
   }
 };
@@ -199,11 +211,10 @@ const isValidArticleUrl = (url: string): boolean => {
     const path = urlObj.pathname;
     if (path === '/' || path === '') return false;
     
-    // Loại bỏ trang chủ, tag, category
-    const badPatterns = ['/tag', '/chuyen-de', '/category', '/tim-kiem', '/search', '/rss'];
+    const badPatterns = ['/tag', '/chuyen-de', '/category', '/tim-kiem', '/search', '/rss', '/video', '/media'];
     if (badPatterns.some(p => path.startsWith(p))) return false;
 
-    // Phải có đuôi file hoặc số ID hoặc đường dẫn dài
+    // Filter logic: Must look like an article
     const hasExtension = path.endsWith('.html') || path.endsWith('.htm');
     const hasNumber = /\d{4,}/.test(path); 
     const isLong = path.length > 25;
