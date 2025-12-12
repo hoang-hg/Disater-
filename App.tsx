@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Header } from './components/Header';
 import { NewsFeed } from './components/NewsFeed';
 import { AnalysisCharts } from './components/AnalysisCharts';
 import { NewsItem, DisasterType } from './types';
-import { MOCK_NEWS, NEWSPAPER_SOURCES } from './constants';
+import { MOCK_NEWS, NEWSPAPER_SOURCES, COLORS } from './constants';
 import { fetchLatestDisasterNews } from './services/geminiService';
 import { fetchFirecrawlNews, isFirecrawlAvailable } from './services/firecrawlService';
 
@@ -13,6 +13,9 @@ const App: React.FC = () => {
   const [loadingText, setLoadingText] = useState<string>('');
   const [lastUpdated, setLastUpdated] = useState<string>(new Date().toLocaleString('vi-VN'));
   const [dataSource, setDataSource] = useState<'mock' | 'live-gemini' | 'live-firecrawl'>('mock');
+  
+  // Filter State
+  const [filterType, setFilterType] = useState<DisasterType | 'ALL'>('ALL');
 
   // Check availability
   const useFirecrawl = isFirecrawlAvailable();
@@ -24,19 +27,18 @@ const App: React.FC = () => {
     // Prioritize Firecrawl if key is present
     if (useFirecrawl) {
       setDataSource('live-firecrawl');
-      setLoadingText('Đang quét nội dung các báo điện tử...');
-      // Small delay to allow UI to update
+      setLoadingText('Đang quét tin từ 12 báo chính thống...');
       await new Promise(r => setTimeout(r, 100));
       
       fetchedNews = await fetchFirecrawlNews();
       
       if (fetchedNews.length === 0) {
-         setLoadingText('Đang thử lại với Google Search...');
+         setLoadingText('Firecrawl trống, chuyển sang Google Search...');
          fetchedNews = await fetchLatestDisasterNews();
       }
     } else {
       setDataSource('live-gemini');
-      setLoadingText('Đang tìm kiếm với Google...');
+      setLoadingText('Đang tìm kiếm trên 12 báo chính thống...');
       fetchedNews = await fetchLatestDisasterNews();
     }
     
@@ -44,7 +46,7 @@ const App: React.FC = () => {
       setNews(fetchedNews);
     } else {
       const msg = useFirecrawl 
-        ? "Không tìm thấy dữ liệu mới phù hợp."
+        ? "Không tìm thấy dữ liệu mới từ 12 nguồn báo chỉ định."
         : "Không tìm thấy tin tức mới hoặc chưa cấu hình API Key.";
       
       alert(msg);
@@ -60,17 +62,34 @@ const App: React.FC = () => {
   const handleReset = () => {
     setNews(MOCK_NEWS);
     setDataSource('mock');
+    setFilterType('ALL');
     setLastUpdated(new Date().toLocaleString('vi-VN'));
   };
 
-  // Calculate Quick Stats
+  // Filter and Sort Logic
+  const filteredAndSortedNews = useMemo(() => {
+    let result = [...news];
+
+    // Filter by type
+    if (filterType !== 'ALL') {
+      result = result.filter(item => item.type === filterType);
+    }
+
+    // Sort by date descending (Newest first)
+    result.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+    return result;
+  }, [news, filterType]);
+
+  // Calculate Quick Stats based on filtered data ? No, usually stats should reflect global data or filtered data?
+  // Let's make stats reflect the CURRENT VIEW (Filtered) for better interaction
   const stats = {
-    events: news.length,
-    deaths: news.reduce((acc, item) => {
+    events: filteredAndSortedNews.length,
+    deaths: filteredAndSortedNews.reduce((acc, item) => {
       const match = item.damage.match(/(\d+)\s+(người\s)?chết/);
       return acc + (match ? parseInt(match[1]) : 0);
     }, 0),
-    loss: news.reduce((acc, item) => {
+    loss: filteredAndSortedNews.reduce((acc, item) => {
       const match = item.damage.match(/(\d+)\s+tỷ/);
       return acc + (match ? parseInt(match[1]) : 0);
     }, 0)
@@ -95,7 +114,7 @@ const App: React.FC = () => {
                 {dataSource === 'live-gemini' && <span className="text-green-600 bg-green-50 px-2 py-0.5 rounded text-xs font-semibold border border-green-100">Live (Google Search)</span>}
                 {dataSource === 'live-firecrawl' && <span className="text-orange-600 bg-orange-50 px-2 py-0.5 rounded text-xs font-semibold border border-orange-100 flex items-center">
                   <svg className="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20"><path d="M13.5 4.5c.6 0 1.1.2 1.5.6.4.4.6.9.6 1.5v6.9c0 .2-.1.5-.2.6l-2.6 2.6c-.2.2-.4.2-.6.2H5.1c-.6 0-1.1-.2-1.5-.6-.4-.4-.6-.9-.6-1.5V6.6c0-.6.2-1.1.6-1.5.4-.4.9-.6 1.5-.6h8.4m0-1.5H5.1C3.7 3 2.5 4.2 2.5 5.6v8.9c0 1.4 1.2 2.5 2.6 2.5h7.1l4.8-4.8V5.6c0-1.4-1.2-2.6-2.6-2.6z"/></svg>
-                  Live (Firecrawl)
+                  Live (12 Báo chính thống)
                 </span>}
               </div>
             </div>
@@ -124,7 +143,7 @@ const App: React.FC = () => {
                     <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                     </svg>
-                    {useFirecrawl ? 'Quét Live (Firecrawl)' : 'Cập nhật Live'}
+                    {useFirecrawl ? 'Quét Live (12 Báo)' : 'Cập nhật Live'}
                   </>
                 )}
               </button>
@@ -132,10 +151,10 @@ const App: React.FC = () => {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <StatCard label="Sự kiện ghi nhận" value={stats.events} color="blue" icon="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+            <StatCard label="Sự kiện hiển thị" value={stats.events} color="blue" icon="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
             <StatCard label="Thiệt hại về người" value={stats.deaths} unit="người" color="red" icon="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            <StatCard label="Thiệt hại kinh tế (ước tính)" value={stats.loss > 0 ? stats.loss : '--'} unit="tỷ VNĐ" color="amber" icon="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            <StatCard label="Nguồn tin theo dõi" value={NEWSPAPER_SOURCES.length} color="slate" icon="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z" />
+            <StatCard label="Thiệt hại kinh tế" value={stats.loss > 0 ? stats.loss : '--'} unit="tỷ VNĐ" color="amber" icon="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            <StatCard label="Nguồn tin chỉ định" value={NEWSPAPER_SOURCES.length} color="slate" icon="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z" />
           </div>
         </div>
 
@@ -144,18 +163,34 @@ const App: React.FC = () => {
           
           {/* Left Column: News Feed */}
           <div className="lg:col-span-2 space-y-4">
-            <div className="flex items-center justify-between">
-               <h3 className="text-lg font-bold text-slate-800 flex items-center">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+               <h3 className="text-lg font-bold text-slate-800 flex items-center whitespace-nowrap">
                  <span className="w-2 h-6 bg-red-600 rounded-full mr-2"></span>
                  Tin tức mới nhất
                </h3>
-               <div className="flex space-x-2 text-xs">
-                 <span className="px-2 py-1 bg-white border rounded text-slate-600">Tất cả</span>
-                 <span className="px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 cursor-pointer">Bão lũ</span>
-                 <span className="px-2 py-1 bg-white border rounded text-slate-600 hover:bg-slate-50 cursor-pointer">Sạt lở</span>
+               
+               {/* Filter Controls */}
+               <div className="flex flex-wrap gap-2 w-full sm:w-auto">
+                 <button 
+                    onClick={() => setFilterType('ALL')}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border ${filterType === 'ALL' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+                 >
+                   Tất cả
+                 </button>
+                 {Object.values(DisasterType).map((type) => (
+                   <button
+                    key={type}
+                    onClick={() => setFilterType(type)}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border ${filterType === type ? 'text-white border-transparent shadow-sm' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+                    style={{ backgroundColor: filterType === type ? COLORS[type] : undefined }}
+                   >
+                     {type}
+                   </button>
+                 ))}
                </div>
             </div>
-            <NewsFeed news={news} isLoading={isLoading} />
+            
+            <NewsFeed news={filteredAndSortedNews} isLoading={isLoading} />
           </div>
 
           {/* Right Column: Analysis & Map Placeholder */}
@@ -164,10 +199,10 @@ const App: React.FC = () => {
             
             {/* Sources List */}
             <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
-               <h3 className="text-sm font-bold text-slate-700 mb-4 uppercase tracking-wider">Nguồn dữ liệu ({NEWSPAPER_SOURCES.length})</h3>
+               <h3 className="text-sm font-bold text-slate-700 mb-4 uppercase tracking-wider">Danh sách 12 Nguồn Báo</h3>
                <div className="flex flex-wrap gap-2">
                  {NEWSPAPER_SOURCES.map((source, idx) => (
-                   <span key={idx} className="px-2 py-1 text-xs bg-slate-100 text-slate-600 rounded hover:bg-slate-200 transition-colors cursor-default">
+                   <span key={idx} className="px-2 py-1 text-xs bg-slate-100 text-slate-600 rounded hover:bg-slate-200 transition-colors cursor-default border border-slate-200">
                      {source}
                    </span>
                  ))}
@@ -181,7 +216,7 @@ const App: React.FC = () => {
       <footer className="bg-slate-900 text-slate-400 py-6 mt-12">
         <div className="container mx-auto px-4 text-center text-sm">
           <p>© 2025 VnDisasterWatch. Dự án tổng hợp tin tức thiên tai phi lợi nhuận.</p>
-          <p className="mt-2 text-xs">Dữ liệu được thu thập tự động từ các báo điện tử Việt Nam và Google Search.</p>
+          <p className="mt-2 text-xs">Dữ liệu được thu thập tự động từ 12 báo điện tử chính thống Việt Nam.</p>
         </div>
       </footer>
     </div>

@@ -1,8 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { NewsItem, DisasterType } from '../types';
+import { ALLOWED_DOMAINS } from '../constants';
 
-// Giả định biến môi trường đã được cấu hình.
-// Trong thực tế, bạn cần thêm FIRECRAWL_API_KEY vào file .env
 const firecrawlKey = process.env.FIRECRAWL_API_KEY || '';
 const googleKey = process.env.API_KEY || '';
 
@@ -15,8 +14,13 @@ export const fetchFirecrawlNews = async (): Promise<NewsItem[]> => {
   }
 
   try {
-    // 1. Sử dụng Firecrawl để tìm kiếm và lấy nội dung bài viết (Scrape)
-    // OPTIMIZATION: Giảm limit xuống 4 để tăng tốc độ phản hồi (tránh timeout khi scrape quá nhiều trang)
+    // 1. SEARCH: Tìm kiếm tin tức trên 12 domain chỉ định
+    const siteOperators = ALLOWED_DOMAINS.map(domain => `site:${domain}`).join(' OR ');
+    // Thêm các từ khóa bổ trợ để lọc bớt tin rác
+    const keywords = "(bão OR lũ lụt OR sạt lở đất OR động đất OR thiên tai) AND (thiệt hại OR cảnh báo OR khẩn cấp)";
+    const query = `(${siteOperators}) AND ${keywords}`;
+
+    // Tăng limit lên 10 để có đủ dữ liệu sau khi lọc bỏ các link trang chủ/chuyên mục
     const firecrawlResponse = await fetch('https://api.firecrawl.dev/v1/search', {
       method: 'POST',
       headers: {
@@ -24,8 +28,8 @@ export const fetchFirecrawlNews = async (): Promise<NewsItem[]> => {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        query: "tin tức thiên tai bão lũ sạt lở động đất Việt Nam mới nhất hôm nay",
-        limit: 4, 
+        query: query,
+        limit: 10, 
         scrapeOptions: {
           formats: ["markdown"],
           onlyMainContent: true
@@ -40,37 +44,49 @@ export const fetchFirecrawlNews = async (): Promise<NewsItem[]> => {
       return [];
     }
 
-    // 2. Chuẩn bị dữ liệu thô để gửi cho Gemini
-    const articlesContext = firecrawlData.data.map((item: any, index: number) => `
---- BÀI BÁO SỐ ${index + 1} ---
-Tiêu đề: ${item.metadata?.title || 'Không rõ'}
-Nguồn: ${item.metadata?.sourceURL || 'Không rõ'}
-Ngày (metadata): ${item.metadata?.date || 'Không rõ'}
-Nội dung tóm tắt:
-${item.markdown ? item.markdown.substring(0, 2500) : 'Không có nội dung'} 
-`).join('\n\n'); // Giới hạn ký tự mỗi bài để giảm token input cho Gemini
+    // 2. FILTER: Lọc bỏ các URL là trang chủ, trang chuyên mục, tag...
+    // Chỉ giữ lại các URL có vẻ là bài viết chi tiết (dựa trên heuristic)
+    const validArticles = firecrawlData.data.filter((item: any) => isValidArticleUrl(item.url));
 
-    // 3. Sử dụng Gemini để trích xuất thông tin có cấu trúc
+    if (validArticles.length === 0) {
+      console.warn("Đã tìm thấy dữ liệu nhưng không có bài viết chi tiết nào hợp lệ (toàn trang chủ/chuyên mục).");
+      return [];
+    }
+
+    // 3. PREPARE CONTEXT: Gửi các bài viết ĐÃ LỌC cho AI
+    const articlesContext = validArticles.map((item: any, index: number) => `
+--- BÀI VIẾT ID: ${index} ---
+URL Gốc: ${item.url}
+Tiêu đề: ${item.metadata?.title || 'Không rõ'}
+Ngày: ${item.metadata?.date || 'Không rõ'}
+Nội dung:
+${item.markdown ? item.markdown.substring(0, 1500) : 'Không có nội dung'} 
+`).join('\n\n');
+
     const ai = new GoogleGenAI({ apiKey: googleKey });
     const prompt = `
-      Dưới đây là nội dung thô của các bài báo về thiên tai tại Việt Nam.
-      Hãy phân tích và trích xuất danh sách JSON các sự kiện thiên tai.
-
-      Yêu cầu:
-      1. Chỉ chọn tin thiên tai (bão, lũ, sạt lở, động đất, hạn hán) tại Việt Nam.
-      2. Trích xuất số liệu thiệt hại cụ thể.
-      3. Ngày tháng định dạng YYYY-MM-DD.
+      Bạn là hệ thống trích xuất dữ liệu thiên tai.
       
-      Dữ liệu:
+      Dữ liệu đầu vào: Các bài báo đã được crawl từ các trang chính thống (VnExpress, TuoiTre, v.v.).
+      Mỗi bài báo được đánh dấu bằng ID (ví dụ: ID: 0, ID: 1...).
+
+      Nhiệm vụ: 
+      Đọc nội dung markdown và trích xuất thông tin thành JSON.
+      
+      Yêu cầu BẮT BUỘC:
+      1. GIỮ NGUYÊN "id" của bài viết trong kết quả JSON (để hệ thống map lại link gốc).
+      2. Nếu bài viết không nói về thiên tai cụ thể (chỉ là dự báo thời tiết chung chung hoặc tin cũ), hãy bỏ qua.
+      3. Trích xuất số liệu thiệt hại nếu có.
+      
+      Dữ liệu bài báo:
       ${articlesContext}
 
       Output JSON Schema (Array):
       [
         {
+          "id": Number (Index của bài viết đầu vào),
           "title": "String",
-          "source": "String",
-          "sourceUrl": "String",
-          "date": "String",
+          "date": "String (YYYY-MM-DD)",
           "type": "Enum (FLOOD, STORM, LANDSLIDE, EARTHQUAKE, DROUGHT, OTHER)",
           "location": "String",
           "damage": "String",
@@ -94,19 +110,31 @@ ${item.markdown ? item.markdown.substring(0, 2500) : 'Không có nội dung'}
 
     const parsedItems = JSON.parse(text);
 
-    return parsedItems.map((item: any, index: number) => ({
-      id: `fc-${Date.now()}-${index}`,
-      title: item.title,
-      source: item.source || extractSourceFromUrl(item.sourceUrl),
-      sourceUrl: item.sourceUrl,
-      date: item.date,
-      type: mapType(item.type),
-      location: item.location,
-      damage: item.damage,
-      summary: item.summary,
-      isVerified: item.isVerified,
-      agency: item.agency
-    }));
+    // 4. MAP & MERGE: Kết hợp dữ liệu từ AI với URL GỐC từ danh sách validArticles
+    const mappedItems = parsedItems.map((aiItem: any) => {
+      // Lấy bài viết gốc từ danh sách ĐÃ LỌC
+      const originalArticle = validArticles[aiItem.id];
+      
+      if (!originalArticle) return null;
+
+      return {
+        id: `fc-${Date.now()}-${aiItem.id}`,
+        title: aiItem.title || originalArticle.metadata?.title || 'Tin thiên tai',
+        source: extractSourceFromUrl(originalArticle.url),
+        sourceUrl: originalArticle.url, // ĐÂY LÀ URL CHÍNH XÁC CỦA BÀI VIẾT
+        date: aiItem.date || originalArticle.metadata?.date || new Date().toISOString().split('T')[0],
+        type: mapType(aiItem.type),
+        location: aiItem.location || 'Việt Nam',
+        damage: aiItem.damage || 'Đang cập nhật',
+        summary: aiItem.summary || 'Bấm vào để xem chi tiết.',
+        isVerified: aiItem.isVerified,
+        agency: aiItem.agency
+      };
+    }).filter((item: any) => item !== null);
+
+    return mappedItems.sort((a: NewsItem, b: NewsItem) => {
+      return new Date(b.date).getTime() - new Date(a.date).getTime();
+    });
 
   } catch (error) {
     console.error("Lỗi khi xử lý với Firecrawl + Gemini:", error);
@@ -114,9 +142,49 @@ ${item.markdown ? item.markdown.substring(0, 2500) : 'Không có nội dung'}
   }
 };
 
+// Hàm lọc URL bài viết (Quan trọng)
+const isValidArticleUrl = (url: string): boolean => {
+  try {
+    const urlObj = new URL(url);
+    const path = urlObj.pathname;
+    
+    // 1. Loại bỏ trang chủ
+    if (path === '/' || path === '') return false;
+    
+    // 2. Loại bỏ các trang chuyên mục, tag, tìm kiếm
+    const badPatterns = ['/tag', '/chuyen-de', '/chu-de', '/category', '/tim-kiem', '/search', '/video', '/media', '/rss'];
+    if (badPatterns.some(p => path.startsWith(p))) return false;
+
+    // 3. Heuristic nhận diện bài viết của báo Việt Nam:
+    // - Thường có đuôi .html hoặc .htm
+    // - Hoặc chứa dãy số ID (ít nhất 4 số)
+    // - Hoặc đường dẫn khá dài (trên 25 ký tự)
+    const hasExtension = path.endsWith('.html') || path.endsWith('.htm');
+    const hasNumber = /\d{4,}/.test(path); 
+    const isLong = path.length > 25;
+
+    // Chấp nhận nếu thỏa mãn ít nhất 1 điều kiện
+    return hasExtension || hasNumber || isLong;
+  } catch {
+    return false;
+  }
+};
+
 const extractSourceFromUrl = (url: string): string => {
   try {
     const hostname = new URL(url).hostname;
+    // Làm đẹp tên báo
+    if (hostname.includes('vnexpress')) return 'VnExpress';
+    if (hostname.includes('tuoitre')) return 'Tuổi Trẻ';
+    if (hostname.includes('thanhnien')) return 'Thanh Niên';
+    if (hostname.includes('dantri')) return 'Dân Trí';
+    if (hostname.includes('vietnamnet')) return 'VietnamNet';
+    if (hostname.includes('sggp')) return 'Sài Gòn Giải Phóng';
+    if (hostname.includes('baotintuc')) return 'Báo Tin Tức';
+    if (hostname.includes('nld')) return 'Người Lao Động';
+    if (hostname.includes('laodong')) return 'Lao Động';
+    if (hostname.includes('qdnd')) return 'Quân Đội Nhân Dân';
+    
     return hostname.replace('www.', '');
   } catch {
     return 'Nguồn Internet';

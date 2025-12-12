@@ -1,10 +1,25 @@
 import { DisasterType, NewsItem } from './types';
 
 export const NEWSPAPER_SOURCES = [
-  "VnExpress", "Tuổi Trẻ", "Thanh Niên", "VietnamNet", 
-  "Dân Trí", "Sài Gòn Giải Phóng", "Người Lao Động", 
-  "Lao Động", "Báo Tin Tức (TTXVN)", "Báo Mới", 
-  "Quân Đội Nhân Dân", "VietnamPlus"
+  "Báo Tin Tức (TTXVN)", "Sài Gòn Giải Phóng", "VnExpress", "VietnamNet", 
+  "Dân Trí", "Báo Mới", "Thanh Niên", "Vnanet (TTXVN)", 
+  "Tuổi Trẻ", "Người Lao Động", "Lao Động", "Quân Đội Nhân Dân"
+];
+
+// Danh sách domain chính xác để filter trong search query
+export const ALLOWED_DOMAINS = [
+  "baotintuc.vn",
+  "sggp.org.vn",
+  "vnexpress.net",
+  "vietnamnet.vn",
+  "dantri.com.vn",
+  "baomoi.com",
+  "thanhnien.vn",
+  "vnanet.vn",
+  "tuoitre.vn",
+  "nld.com.vn",
+  "laodong.vn",
+  "qdnd.vn"
 ];
 
 // Mock data based on the "2025 Scenario" described in the prompt
