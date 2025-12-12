@@ -1,12 +1,20 @@
 import { GoogleGenAI } from "@google/genai";
 import { NewsItem, DisasterType } from '../types';
-import { ALLOWED_DOMAINS } from '../constants';
+import { ALLOWED_DOMAINS, SOURCE_ENTRY_POINTS } from '../constants';
 
 const firecrawlKey = process.env.FIRECRAWL_API_KEY || '';
 const googleKey = process.env.API_KEY || '';
 
 export const isFirecrawlAvailable = () => !!firecrawlKey && !!googleKey;
 
+/**
+ * QUY TRÌNH MỚI: MAP -> SCRAPE -> ANALYZE
+ * 1. Chọn ngẫu nhiên 3 domain từ danh sách (để tối ưu hiệu năng frontend).
+ * 2. Dùng /v1/map để quét các link con chứa từ khóa "thiên tai/bão/lũ" từ các trang chuyên mục.
+ * 3. Lấy Top URL hợp lệ nhất.
+ * 4. Dùng /v1/batch/scrape để lấy nội dung chi tiết.
+ * 5. Gửi cho Gemini phân tích.
+ */
 export const fetchFirecrawlNews = async (): Promise<NewsItem[]> => {
   if (!firecrawlKey) {
     console.warn("Firecrawl API Key missing.");
@@ -14,77 +22,65 @@ export const fetchFirecrawlNews = async (): Promise<NewsItem[]> => {
   }
 
   try {
-    // 1. SEARCH: Tìm kiếm tin tức trên 12 domain chỉ định
-    const siteOperators = ALLOWED_DOMAINS.map(domain => `site:${domain}`).join(' OR ');
-    // Thêm các từ khóa bổ trợ để lọc bớt tin rác
-    const keywords = "(bão OR lũ lụt OR sạt lở đất OR động đất OR thiên tai) AND (thiệt hại OR cảnh báo OR khẩn cấp)";
-    const query = `(${siteOperators}) AND ${keywords}`;
+    // 1. Chọn ngẫu nhiên 3 domain để quét (tránh request quá nhiều cùng lúc)
+    const shuffledDomains = [...ALLOWED_DOMAINS].sort(() => 0.5 - Math.random()).slice(0, 3);
+    const targetUrls = shuffledDomains.map(d => SOURCE_ENTRY_POINTS[d] || `https://${d}`);
 
-    // Tăng limit lên 10 để có đủ dữ liệu sau khi lọc bỏ các link trang chủ/chuyên mục
-    const firecrawlResponse = await fetch('https://api.firecrawl.dev/v1/search', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${firecrawlKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        query: query,
-        limit: 10, 
-        scrapeOptions: {
-          formats: ["markdown"],
-          onlyMainContent: true
-        }
-      })
+    console.log("Đang quét Map các trang:", targetUrls);
+
+    // 2. Chạy Map song song để tìm Link bài viết
+    const mapPromises = targetUrls.map(url => mapSiteForLinks(url));
+    const mapResults = await Promise.all(mapPromises);
+
+    // Gom tất cả link tìm được vào một mảng duy nhất
+    let foundLinks: string[] = [];
+    mapResults.forEach(links => {
+      // Lấy tối đa 2 link mỗi trang để Scrape
+      foundLinks = [...foundLinks, ...links.slice(0, 2)];
     });
 
-    const firecrawlData = await firecrawlResponse.json();
+    // Lọc trùng
+    foundLinks = [...new Set(foundLinks)];
 
-    if (!firecrawlData.success || !firecrawlData.data || firecrawlData.data.length === 0) {
-      console.error("Firecrawl không tìm thấy dữ liệu:", firecrawlData);
+    if (foundLinks.length === 0) {
+      console.warn("Không tìm thấy link bài viết nào qua Map.");
       return [];
     }
 
-    // 2. FILTER: Lọc bỏ các URL là trang chủ, trang chuyên mục, tag...
-    // Chỉ giữ lại các URL có vẻ là bài viết chi tiết (dựa trên heuristic)
-    const validArticles = firecrawlData.data.filter((item: any) => isValidArticleUrl(item.url));
+    console.log("Tìm thấy các link bài viết:", foundLinks);
 
-    if (validArticles.length === 0) {
-      console.warn("Đã tìm thấy dữ liệu nhưng không có bài viết chi tiết nào hợp lệ (toàn trang chủ/chuyên mục).");
-      return [];
-    }
+    // 3. Batch Scrape nội dung các link này
+    const scrapedData = await batchScrapeUrls(foundLinks);
 
-    // 3. PREPARE CONTEXT: Gửi các bài viết ĐÃ LỌC cho AI
-    const articlesContext = validArticles.map((item: any, index: number) => `
+    if (scrapedData.length === 0) return [];
+
+    // 4. Chuẩn bị context cho AI
+    const articlesContext = scrapedData.map((item: any, index: number) => `
 --- BÀI VIẾT ID: ${index} ---
-URL Gốc: ${item.url}
+URL Gốc: ${item.metadata?.sourceURL || item.url}
 Tiêu đề: ${item.metadata?.title || 'Không rõ'}
 Ngày: ${item.metadata?.date || 'Không rõ'}
 Nội dung:
-${item.markdown ? item.markdown.substring(0, 1500) : 'Không có nội dung'} 
+${item.markdown ? item.markdown.substring(0, 2000) : 'Không có nội dung'} 
 `).join('\n\n');
 
+    // 5. Gửi cho Gemini
     const ai = new GoogleGenAI({ apiKey: googleKey });
     const prompt = `
       Bạn là hệ thống trích xuất dữ liệu thiên tai.
+      Dữ liệu đầu vào là nội dung Markdown từ các bài báo thật.
       
-      Dữ liệu đầu vào: Các bài báo đã được crawl từ các trang chính thống (VnExpress, TuoiTre, v.v.).
-      Mỗi bài báo được đánh dấu bằng ID (ví dụ: ID: 0, ID: 1...).
-
-      Nhiệm vụ: 
-      Đọc nội dung markdown và trích xuất thông tin thành JSON.
+      Nhiệm vụ: Trích xuất thông tin thành JSON.
       
-      Yêu cầu BẮT BUỘC:
-      1. GIỮ NGUYÊN "id" của bài viết trong kết quả JSON (để hệ thống map lại link gốc).
-      2. Nếu bài viết không nói về thiên tai cụ thể (chỉ là dự báo thời tiết chung chung hoặc tin cũ), hãy bỏ qua.
-      3. Trích xuất số liệu thiệt hại nếu có.
-      
-      Dữ liệu bài báo:
-      ${articlesContext}
+      QUAN TRỌNG:
+      1. GIỮ NGUYÊN "id" (Index) để map ngược lại URL gốc.
+      2. Trích xuất chính xác Loại thiên tai, Địa điểm, Thiệt hại.
+      3. Nếu bài viết không liên quan đến thiên tai, bão lũ, sạt lở... hãy BỎ QUA.
 
       Output JSON Schema (Array):
       [
         {
-          "id": Number (Index của bài viết đầu vào),
+          "id": Number,
           "title": "String",
           "date": "String (YYYY-MM-DD)",
           "type": "Enum (FLOOD, STORM, LANDSLIDE, EARTHQUAKE, DROUGHT, OTHER)",
@@ -99,7 +95,7 @@ ${item.markdown ? item.markdown.substring(0, 1500) : 'Không có nội dung'}
 
     const generatedContent = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
-      contents: prompt,
+      contents: prompt + "\n\n" + articlesContext,
       config: {
         responseMimeType: "application/json"
       }
@@ -110,18 +106,19 @@ ${item.markdown ? item.markdown.substring(0, 1500) : 'Không có nội dung'}
 
     const parsedItems = JSON.parse(text);
 
-    // 4. MAP & MERGE: Kết hợp dữ liệu từ AI với URL GỐC từ danh sách validArticles
+    // 6. Map kết quả AI với URL gốc từ dữ liệu Scrape
     const mappedItems = parsedItems.map((aiItem: any) => {
-      // Lấy bài viết gốc từ danh sách ĐÃ LỌC
-      const originalArticle = validArticles[aiItem.id];
-      
+      const originalArticle = scrapedData[aiItem.id];
       if (!originalArticle) return null;
 
+      // URL chính xác từ kết quả scrape (hoặc map)
+      const finalUrl = originalArticle.metadata?.sourceURL || originalArticle.url;
+
       return {
-        id: `fc-${Date.now()}-${aiItem.id}`,
+        id: `fc-map-${Date.now()}-${aiItem.id}`,
         title: aiItem.title || originalArticle.metadata?.title || 'Tin thiên tai',
-        source: extractSourceFromUrl(originalArticle.url),
-        sourceUrl: originalArticle.url, // ĐÂY LÀ URL CHÍNH XÁC CỦA BÀI VIẾT
+        source: extractSourceFromUrl(finalUrl),
+        sourceUrl: finalUrl, // URL CHÍNH XÁC 100%
         date: aiItem.date || originalArticle.metadata?.date || new Date().toISOString().split('T')[0],
         type: mapType(aiItem.type),
         location: aiItem.location || 'Việt Nam',
@@ -137,33 +134,80 @@ ${item.markdown ? item.markdown.substring(0, 1500) : 'Không có nội dung'}
     });
 
   } catch (error) {
-    console.error("Lỗi khi xử lý với Firecrawl + Gemini:", error);
+    console.error("Lỗi quy trình Map -> Scrape:", error);
     return [];
   }
 };
 
-// Hàm lọc URL bài viết (Quan trọng)
+// --- HÀM HỖ TRỢ FIRECRAWL ---
+
+// 1. Sử dụng /v1/map để tìm link con
+const mapSiteForLinks = async (url: string): Promise<string[]> => {
+  try {
+    const response = await fetch('https://api.firecrawl.dev/v1/map', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${firecrawlKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        url: url,
+        search: "thiên tai bão lũ sạt lở", // Chỉ tìm link có chứa từ khóa này
+        limit: 10, // Chỉ lấy 10 link để lọc
+        ignoreSitemap: true // Quét trực tiếp trang
+      })
+    });
+    
+    const data = await response.json();
+    if (!data.success || !data.links) return [];
+
+    // Lọc lại link một lần nữa để đảm bảo chất lượng
+    return data.links.filter((link: string) => isValidArticleUrl(link));
+  } catch (e) {
+    console.error(`Lỗi map ${url}:`, e);
+    return [];
+  }
+};
+
+// 2. Sử dụng /v1/batch/scrape để lấy nội dung
+const batchScrapeUrls = async (urls: string[]): Promise<any[]> => {
+  try {
+    const response = await fetch('https://api.firecrawl.dev/v1/batch/scrape', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${firecrawlKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        urls: urls,
+        formats: ["markdown"],
+        onlyMainContent: true
+      })
+    });
+    const data = await response.json();
+    if (!data.success || !data.data) return [];
+    return data.data;
+  } catch (e) {
+    console.error("Lỗi batch scrape:", e);
+    return [];
+  }
+};
+
 const isValidArticleUrl = (url: string): boolean => {
   try {
     const urlObj = new URL(url);
     const path = urlObj.pathname;
-    
-    // 1. Loại bỏ trang chủ
     if (path === '/' || path === '') return false;
     
-    // 2. Loại bỏ các trang chuyên mục, tag, tìm kiếm
-    const badPatterns = ['/tag', '/chuyen-de', '/chu-de', '/category', '/tim-kiem', '/search', '/video', '/media', '/rss'];
+    // Loại bỏ trang chủ, tag, category
+    const badPatterns = ['/tag', '/chuyen-de', '/category', '/tim-kiem', '/search', '/rss'];
     if (badPatterns.some(p => path.startsWith(p))) return false;
 
-    // 3. Heuristic nhận diện bài viết của báo Việt Nam:
-    // - Thường có đuôi .html hoặc .htm
-    // - Hoặc chứa dãy số ID (ít nhất 4 số)
-    // - Hoặc đường dẫn khá dài (trên 25 ký tự)
+    // Phải có đuôi file hoặc số ID hoặc đường dẫn dài
     const hasExtension = path.endsWith('.html') || path.endsWith('.htm');
     const hasNumber = /\d{4,}/.test(path); 
     const isLong = path.length > 25;
 
-    // Chấp nhận nếu thỏa mãn ít nhất 1 điều kiện
     return hasExtension || hasNumber || isLong;
   } catch {
     return false;
@@ -173,7 +217,6 @@ const isValidArticleUrl = (url: string): boolean => {
 const extractSourceFromUrl = (url: string): string => {
   try {
     const hostname = new URL(url).hostname;
-    // Làm đẹp tên báo
     if (hostname.includes('vnexpress')) return 'VnExpress';
     if (hostname.includes('tuoitre')) return 'Tuổi Trẻ';
     if (hostname.includes('thanhnien')) return 'Thanh Niên';
@@ -184,7 +227,6 @@ const extractSourceFromUrl = (url: string): string => {
     if (hostname.includes('nld')) return 'Người Lao Động';
     if (hostname.includes('laodong')) return 'Lao Động';
     if (hostname.includes('qdnd')) return 'Quân Đội Nhân Dân';
-    
     return hostname.replace('www.', '');
   } catch {
     return 'Nguồn Internet';
