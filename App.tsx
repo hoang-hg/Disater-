@@ -5,26 +5,41 @@ import { AnalysisCharts } from './components/AnalysisCharts';
 import { NewsItem, DisasterType } from './types';
 import { MOCK_NEWS, NEWSPAPER_SOURCES } from './constants';
 import { fetchLatestDisasterNews } from './services/geminiService';
+import { fetchFirecrawlNews, isFirecrawlAvailable } from './services/firecrawlService';
 
 const App: React.FC = () => {
   const [news, setNews] = useState<NewsItem[]>(MOCK_NEWS);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [lastUpdated, setLastUpdated] = useState<string>(new Date().toLocaleString('vi-VN'));
-  const [dataSource, setDataSource] = useState<'mock' | 'live'>('mock');
+  const [dataSource, setDataSource] = useState<'mock' | 'live-gemini' | 'live-firecrawl'>('mock');
+
+  // Check availability
+  const useFirecrawl = isFirecrawlAvailable();
 
   const handleRefresh = async () => {
     setIsLoading(true);
-    setDataSource('live');
-    
-    // Call Gemini Service
-    const fetchedNews = await fetchLatestDisasterNews();
+    let fetchedNews: NewsItem[] = [];
+
+    // Prioritize Firecrawl if key is present
+    if (useFirecrawl) {
+      setDataSource('live-firecrawl');
+      fetchedNews = await fetchFirecrawlNews();
+    } else {
+      setDataSource('live-gemini');
+      fetchedNews = await fetchLatestDisasterNews();
+    }
     
     if (fetchedNews.length > 0) {
       setNews(fetchedNews);
     } else {
-      // Fallback or alert if empty (using alert strictly for demo purposes)
-      alert("Không tìm thấy tin tức mới hoặc chưa cấu hình API Key. Hiển thị dữ liệu mẫu.");
-      setNews(MOCK_NEWS);
+      const msg = useFirecrawl 
+        ? "Firecrawl không trả về kết quả nào. Đang thử lại với dữ liệu mẫu."
+        : "Không tìm thấy tin tức mới hoặc chưa cấu hình API Key. Hiển thị dữ liệu mẫu.";
+      
+      alert(msg);
+      // Optional: Don't revert to mock if we want to show empty state, 
+      // but for UX keeping mock data is better in a demo.
+      if (news.length === 0) setNews(MOCK_NEWS);
       setDataSource('mock');
     }
     
@@ -42,7 +57,6 @@ const App: React.FC = () => {
   const stats = {
     events: news.length,
     deaths: news.reduce((acc, item) => {
-      // Very basic regex to extract deaths for demo. In production, use robust NLP.
       const match = item.damage.match(/(\d+)\s+(người\s)?chết/);
       return acc + (match ? parseInt(match[1]) : 0);
     }, 0),
@@ -63,18 +77,24 @@ const App: React.FC = () => {
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
             <div>
               <h2 className="text-2xl font-bold text-slate-800">Tổng quan tình hình</h2>
-              <p className="text-sm text-slate-500">
-                Cập nhật lúc: <span className="font-mono font-medium text-slate-700">{lastUpdated}</span> 
-                {dataSource === 'mock' && <span className="ml-2 text-amber-600 bg-amber-50 px-2 py-0.5 rounded text-xs font-semibold">(Dữ liệu mô phỏng 2025)</span>}
-                {dataSource === 'live' && <span className="ml-2 text-green-600 bg-green-50 px-2 py-0.5 rounded text-xs font-semibold">(Dữ liệu thực tế từ AI)</span>}
-              </p>
+              <div className="flex flex-wrap items-center gap-2 mt-1">
+                <p className="text-sm text-slate-500">
+                  Cập nhật lúc: <span className="font-mono font-medium text-slate-700">{lastUpdated}</span> 
+                </p>
+                {dataSource === 'mock' && <span className="text-amber-600 bg-amber-50 px-2 py-0.5 rounded text-xs font-semibold border border-amber-100">Dữ liệu mô phỏng 2025</span>}
+                {dataSource === 'live-gemini' && <span className="text-green-600 bg-green-50 px-2 py-0.5 rounded text-xs font-semibold border border-green-100">Live (Google Search)</span>}
+                {dataSource === 'live-firecrawl' && <span className="text-orange-600 bg-orange-50 px-2 py-0.5 rounded text-xs font-semibold border border-orange-100 flex items-center">
+                  <svg className="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20"><path d="M13.5 4.5c.6 0 1.1.2 1.5.6.4.4.6.9.6 1.5v6.9c0 .2-.1.5-.2.6l-2.6 2.6c-.2.2-.4.2-.6.2H5.1c-.6 0-1.1-.2-1.5-.6-.4-.4-.6-.9-.6-1.5V6.6c0-.6.2-1.1.6-1.5.4-.4.9-.6 1.5-.6h8.4m0-1.5H5.1C3.7 3 2.5 4.2 2.5 5.6v8.9c0 1.4 1.2 2.5 2.6 2.5h7.1l4.8-4.8V5.6c0-1.4-1.2-2.6-2.6-2.6z"/></svg>
+                  Live (Firecrawl)
+                </span>}
+              </div>
             </div>
             <div className="flex space-x-2">
                <button 
                 onClick={handleReset}
                 className="px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-50 transition-colors shadow-sm"
               >
-                Xem kịch bản 2025
+                Kịch bản mẫu
               </button>
               <button 
                 onClick={handleRefresh}
@@ -87,14 +107,14 @@ const App: React.FC = () => {
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
-                    Đang quét tin...
+                    Đang quét...
                   </>
                 ) : (
                   <>
                     <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                     </svg>
-                    Cập nhật thời gian thực
+                    {useFirecrawl ? 'Quét Live (Firecrawl)' : 'Cập nhật Live'}
                   </>
                 )}
               </button>
